@@ -181,12 +181,12 @@ int main(int argc, char* argv[]) {
     GetValue(lm_dir, LM_DIR, model_path);
     GetValue(hotword, HOTWORD, model_path);
 
-    GetValue(offline_model_revision, "offline-model-revision", model_path);
-    GetValue(online_model_revision, "online-model-revision", model_path);
-    GetValue(vad_revision, "vad-revision", model_path);
-    GetValue(punc_revision, "punc-revision", model_path);
-    GetValue(itn_revision, "itn-revision", model_path);
-    GetValue(lm_revision, "lm-revision", model_path);
+    // GetValue(offline_model_revision, "offline-model-revision", model_path);
+    // GetValue(online_model_revision, "online-model-revision", model_path);
+    // GetValue(vad_revision, "vad-revision", model_path);
+    // GetValue(punc_revision, "punc-revision", model_path);
+    // GetValue(itn_revision, "itn-revision", model_path);
+    // GetValue(lm_revision, "lm-revision", model_path);
 
     global_beam_ = global_beam.getValue();
     lattice_beam_ = lattice_beam.getValue();
