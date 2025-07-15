@@ -302,7 +302,7 @@ bool Audio::FfmpegLoad(const char *filename, bool copy2char){
         avformat_free_context(formatContext);
         return false;
     }
-    const AVCodec* codec = nullptr;
+    AVCodec* codec = nullptr;
     AVCodecParameters* codecParameters = nullptr;
     int audioStreamIndex = av_find_best_stream(formatContext, AVMEDIA_TYPE_AUDIO, -1, -1, &codec, 0);
     if (audioStreamIndex >= 0) {
@@ -483,7 +483,7 @@ bool Audio::FfmpegLoad(const char* buf, int n_file_len){
         avformat_free_context(formatContext);
         return false;
     }
-    const AVCodec* codec = nullptr;
+    AVCodec* codec = nullptr;
     AVCodecParameters* codecParameters = nullptr;
     int audioStreamIndex = av_find_best_stream(formatContext, AVMEDIA_TYPE_AUDIO, -1, -1, &codec, 0);
     if (audioStreamIndex >= 0) {
