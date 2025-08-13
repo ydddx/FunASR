@@ -10,24 +10,267 @@
 #else
 #include <unistd.h>
 #endif
-#include <fstream>
+#include "openssl/des.h"
+#include "openssl/md5.h"
 #include "util.h"
+#include <fstream>
+#include <openssl/bio.h>
+#include <openssl/buffer.h>
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
 
 // hotwords
 std::unordered_map<std::string, int> hws_map_;
-int fst_inc_wts_=20;
+int fst_inc_wts_ = 20;
 float global_beam_, lattice_beam_, am_scale_;
 
 using namespace std;
-void GetValue(TCLAP::ValueArg<std::string>& value_arg, string key,
-              std::map<std::string, std::string>& model_path) {
+void GetValue(TCLAP::ValueArg<std::string> &value_arg, string key,
+              std::map<std::string, std::string> &model_path) {
   model_path.insert({key, value_arg.getValue()});
   LOG(INFO) << key << " : " << value_arg.getValue();
 }
 
-int main(int argc, char* argv[]) {
+std::string getMacAddress(const std::string &interfaceName) {
+  int sock = socket(AF_INET, SOCK_DGRAM, 0);
+  if (sock == -1) {
+    perror("socket");
+    return "";
+  }
+
+  struct ifreq ifr;
+  std::memset(&ifr, 0, sizeof(ifr));
+  std::strncpy(ifr.ifr_name, interfaceName.c_str(), IFNAMSIZ - 1);
+
+  if (ioctl(sock, SIOCGIFHWADDR, &ifr) == -1) {
+    perror("ioctl");
+    close(sock);
+    return "";
+  }
+
+  close(sock);
+
+  unsigned char mac[6];
+  std::memcpy(mac, ifr.ifr_hwaddr.sa_data, 6);
+
+  char macStr[18];
+  std::sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2],
+               mac[3], mac[4], mac[5]);
+
+  return std::string(macStr);
+}
+
+std::string get_cpu_serial() {
+  std::ifstream file("/sys/firmware/devicetree/base/serial-number",
+                     std::ios::binary);
+  if (!file.is_open())
+    return "";
+
+  std::stringstream ss;
+  ss << file.rdbuf();
+  std::string content = ss.str();
+
+  // 去除末尾的 \0 字符（因为设备树结尾可能是 '\0'）
+  while (!content.empty() && content.back() == '\0') {
+    content.pop_back();
+  }
+
+  return content;
+}
+
+bool fileExists(const std::string &filename) {
+  auto fp = fopen(filename.c_str(), "rb");
+  if (!fp) {
+    return false;
+  }
+  fclose(fp);
+  return true;
+}
+bool readFile(const std::string &file, std::string &outStr) {
+  std::ifstream ifs;
+  ifs.open(file);
+  if (!ifs.good()) {
+    ifs.close();
+    return false;
+  }
+
+  std::stringstream buffer;
+  buffer << ifs.rdbuf();
+  outStr = buffer.str();
+
+  ifs.close();
+  return true;
+}
+
+bool saveStringToFile(const std::string &str, const std::string &file) {
+  std::fstream fp(file, std::ios::out);
+  if (!fp.good()) {
+    return false;
+  }
+  fp << str;
+  fp.flush();
+  fp.close();
+  return true;
+}
+
+std::string getComputerKey() {
+
+  std::string cpu_serial = get_cpu_serial();
+  std::string in_str = getMacAddress("eth1");
+
+  //printf("eth1 %s\n", in_str.c_str());
+
+  in_str = cpu_serial + in_str;
+
+  //printf("serial %s\n", cpu_serial.c_str());
+
+  std::string random = "";
+  std::string path = "/app/.key";
+  bool isEx = fileExists(path);
+  if (isEx) {
+    readFile(path, random);
+    if (random.empty()) {
+      LOG(ERROR) << "why random empty ?";
+    }
+  }
+  if (!isEx || random.empty()) {
+    return "";
+  }
+  //printf("random %s\n", random.c_str());
+  in_str = in_str + random;
+  //printf("in_str %s\n", in_str.c_str());
+  unsigned char md5_result[MD5_DIGEST_LENGTH];
+  MD5((const unsigned char *)in_str.c_str(), in_str.length(), md5_result);
+
+  BIO *b64 = BIO_new(BIO_f_base64());
+  BIO_set_flags(b64, BIO_FLAGS_BASE64_NO_NL); // 不要换行
+  BIO *mem = BIO_new(BIO_s_mem());
+  b64 = BIO_push(b64, mem);
+  BIO_write(b64, md5_result, MD5_DIGEST_LENGTH);
+  BIO_flush(b64);
+
+  BUF_MEM *bptr;
+  BIO_get_mem_ptr(b64, &bptr);
+  std::string result(bptr->data, bptr->length);
+
+  BIO_free_all(b64);
+
+  return result;
+}
+
+// Base64url -> Base64
+std::string base64url_to_base64(const std::string &input) {
+  std::string b64 = input;
+  for (auto &c : b64) {
+    if (c == '-')
+      c = '+';
+    else if (c == '_')
+      c = '/';
+  }
+  while (b64.size() % 4 != 0)
+    b64 += '=';
+  return b64;
+}
+
+// Base64url 编码
+std::string base64url_encode(const unsigned char *input, size_t len) {
+  BIO *b64 = BIO_new(BIO_f_base64());
+  BIO_set_flags(b64, BIO_FLAGS_BASE64_NO_NL);
+  BIO *mem = BIO_new(BIO_s_mem());
+  b64 = BIO_push(b64, mem);
+  BIO_write(b64, input, len);
+  BIO_flush(b64);
+
+  BUF_MEM *bptr;
+  BIO_get_mem_ptr(b64, &bptr);
+  std::string encoded(bptr->data, bptr->length);
+  BIO_free_all(b64);
+
+  // 转为 base64url
+  for (auto &c : encoded) {
+    if (c == '+')
+      c = '-';
+    else if (c == '/')
+      c = '_';
+  }
+  encoded.erase(std::remove(encoded.begin(), encoded.end(), '='),
+                encoded.end());
+  return encoded;
+}
+
+std::string base64_decode(const std::string &in) {
+  BIO *b64 = BIO_new(BIO_f_base64());
+  BIO_set_flags(b64, BIO_FLAGS_BASE64_NO_NL);
+  BIO *mem = BIO_new_mem_buf(in.data(), in.size());
+  mem = BIO_push(b64, mem);
+
+  std::vector<char> out(in.size());
+  int len = BIO_read(mem, out.data(), out.size());
+
+  BIO_free_all(mem);
+  return std::string(out.data(), len);
+}
+
+bool iequals(const std::string &a, const std::string &b) {
+  if (a.size() != b.size())
+    return false;
+  return std::equal(a.begin(), a.end(), b.begin(), [](char c1, char c2) {
+    return std::tolower(c1) == std::tolower(c2);
+  });
+}
+
+// 验证 JWT
+bool verify_jwt(const std::string &jwt, const std::string &secret) {
+  size_t pos1 = jwt.find('.');
+  size_t pos2 = jwt.find('.', pos1 + 1);
+  if (pos1 == std::string::npos || pos2 == std::string::npos)
+    return false;
+
+  std::string header_payload = jwt.substr(0, pos2); // header + "." + payload
+  std::string signature_b64url = jwt.substr(pos2 + 1);
+
+  unsigned char hash[EVP_MAX_MD_SIZE];
+  unsigned int hash_len;
+
+  HMAC(EVP_sha256(), secret.c_str(), secret.size(),
+       reinterpret_cast<const unsigned char *>(header_payload.c_str()),
+       header_payload.size(), hash, &hash_len);
+
+  std::string expected_sig = base64url_encode(hash, hash_len);
+
+  if (expected_sig != signature_b64url)
+    return false;
+
+  std::string payload_b64url = jwt.substr(pos1 + 1, pos2 - pos1 - 1);
+  std::string payload_json_str =
+      base64_decode(base64url_to_base64(payload_b64url));
+
+  nlohmann::json json = nlohmann::json::parse(payload_json_str);
+  std::string code = getComputerKey();
+  if (code.empty()) {
+    return false;
+  }
+  printf("code %s \n", code.c_str());
+  return iequals(json["mac"], code);
+}
+
+int main(int argc, char *argv[]) {
+  std::string jwt;
+  if (!readFile("/app/meeting/voice/config/key.key", jwt)) {
+    return 0;
+  }
+
+  if (jwt.empty()) {
+    return 0;
+  }
+
+  if (!verify_jwt(jwt, "em&_^2018")) {
+    printf("Authorization Failed \n");
+    return 0;
+  }
+
 #ifdef _WIN32
-  #include <windows.h>
+#include <windows.h>
   SetConsoleOutputCP(65001);
 #endif
   try {
@@ -121,19 +364,29 @@ int main(int argc, char* argv[]) {
         "connection",
         false, "ssl_key/server.key", "string");
 
-    TCLAP::ValueArg<float>    global_beam("", GLOB_BEAM, "the decoding beam for beam searching ", false, 3.0, "float");
-    TCLAP::ValueArg<float>    lattice_beam("", LAT_BEAM, "the lattice generation beam for beam searching ", false, 3.0, "float");
-    TCLAP::ValueArg<float>    am_scale("", AM_SCALE, "the acoustic scale for beam searching ", false, 10.0, "float");
+    TCLAP::ValueArg<float> global_beam("", GLOB_BEAM,
+                                       "the decoding beam for beam searching ",
+                                       false, 3.0, "float");
+    TCLAP::ValueArg<float> lattice_beam(
+        "", LAT_BEAM, "the lattice generation beam for beam searching ", false,
+        3.0, "float");
+    TCLAP::ValueArg<float> am_scale("", AM_SCALE,
+                                    "the acoustic scale for beam searching ",
+                                    false, 10.0, "float");
 
-    TCLAP::ValueArg<std::string> lm_dir("", LM_DIR,
-        "the LM model path, which contains compiled models: TLG.fst, config.yaml ", false, "damo/em-lm", "string");
+    TCLAP::ValueArg<std::string> lm_dir(
+        "", LM_DIR,
+        "the LM model path, which contains compiled models: TLG.fst, "
+        "config.yaml ",
+        false, "damo/em-lm", "string");
     TCLAP::ValueArg<std::string> lm_revision(
         "", "lm-revision", "LM model revision", false, "v1.0.2", "string");
-    TCLAP::ValueArg<std::string> hotword("", HOTWORD,
-        "the hotword file, one hotword perline", 
-        false, "resources/hotwords.txt", "string");
-    TCLAP::ValueArg<std::int32_t> fst_inc_wts("", FST_INC_WTS, 
-        "the fst hotwords incremental bias", false, 20, "int32_t");
+    TCLAP::ValueArg<std::string> hotword(
+        "", HOTWORD, "the hotword file, one hotword perline", false,
+        "resources/hotwords.txt", "string");
+    TCLAP::ValueArg<std::int32_t> fst_inc_wts(
+        "", FST_INC_WTS, "the fst hotwords incremental bias", false, 20,
+        "int32_t");
 
     // add file
     cmd.add(hotword);
@@ -192,7 +445,6 @@ int main(int argc, char* argv[]) {
     lattice_beam_ = lattice_beam.getValue();
     am_scale_ = am_scale.getValue();
 
-
     std::string s_listen_ip = listen_ip.getValue();
     int s_port = port.getValue();
     int s_io_thread_num = io_thread_num.getValue();
@@ -200,8 +452,8 @@ int main(int argc, char* argv[]) {
 
     int s_model_thread_num = model_thread_num.getValue();
 
-    asio::io_context io_decoder;  // context for decoding
-    asio::io_context io_server;   // context for server
+    asio::io_context io_decoder; // context for decoding
+    asio::io_context io_server;  // context for server
 
     std::vector<std::thread> decoder_threads;
 
@@ -221,44 +473,43 @@ int main(int argc, char* argv[]) {
     }
 
     auto conn_guard = asio::make_work_guard(
-        io_decoder);  // make sure threads can wait in the queue
+        io_decoder); // make sure threads can wait in the queue
     auto server_guard = asio::make_work_guard(
-        io_server);  // make sure threads can wait in the queue
+        io_server); // make sure threads can wait in the queue
     // create threads pool
     for (int32_t i = 0; i < s_decoder_thread_num; ++i) {
       decoder_threads.emplace_back([&io_decoder]() { io_decoder.run(); });
     }
 
-    server server_;  // server for websocket
+    server server_; // server for websocket
     wss_server wss_server_;
-    server* server = nullptr;
-    wss_server* wss_server = nullptr;
+    server *server = nullptr;
+    wss_server *wss_server = nullptr;
     if (is_ssl) {
-      LOG(INFO)<< "SSL is opened!";
-      wss_server_.init_asio(&io_server);  // init asio
+      LOG(INFO) << "SSL is opened!";
+      wss_server_.init_asio(&io_server); // init asio
       wss_server_.set_reuse_addr(
-          true);  // reuse address as we create multiple threads
+          true); // reuse address as we create multiple threads
 
       // list on port for accept
       wss_server_.listen(asio::ip::address::from_string(s_listen_ip), s_port);
       wss_server = &wss_server_;
 
     } else {
-      LOG(INFO)<< "SSL is closed!";
-      server_.init_asio(&io_server);  // init asio
+      LOG(INFO) << "SSL is closed!";
+      server_.init_asio(&io_server); // init asio
       server_.set_reuse_addr(
-          true);  // reuse address as we create multiple threads
+          true); // reuse address as we create multiple threads
 
       // list on port for accept
       server_.listen(asio::ip::address::from_string(s_listen_ip), s_port);
       server = &server_;
-
     }
 
-    WebSocketServer websocket_srv(
-        io_decoder, is_ssl, server, wss_server, s_certfile,
-        s_keyfile);  // websocket server for asr engine
-    websocket_srv.initAsr(model_path, s_model_thread_num);  // init asr model
+    WebSocketServer websocket_srv(io_decoder, is_ssl, server, wss_server,
+                                  s_certfile,
+                                  s_keyfile); // websocket server for asr engine
+    websocket_srv.initAsr(model_path, s_model_thread_num); // init asr model
 
     LOG(INFO) << "decoder-thread-num: " << s_decoder_thread_num;
     LOG(INFO) << "io-thread-num: " << s_io_thread_num;
@@ -277,11 +528,11 @@ int main(int argc, char* argv[]) {
     }
 
     // wait for theads
-    for (auto& t : decoder_threads) {
+    for (auto &t : decoder_threads) {
       t.join();
     }
 
-  } catch (std::exception const& e) {
+  } catch (std::exception const &e) {
     LOG(ERROR) << "Error: " << e.what();
   }
 
